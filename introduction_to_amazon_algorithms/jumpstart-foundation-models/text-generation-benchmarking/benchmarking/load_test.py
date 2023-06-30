@@ -25,7 +25,7 @@ class PredictionResult(NamedTuple):
 
     def input_sequence_num_words(self):
         """The word count of the input sequence."""
-        return self._num_words(self.payload["text_inputs"])
+        return self._num_words(self._text_inputs())
 
     def output_sequence(self):
         """The output sequence with the input sequence prefix removed.
@@ -44,7 +44,7 @@ class PredictionResult(NamedTuple):
                 else:
                     raise ValueError("Output data contains dictionary without recognized keys.")
 
-        text_inputs = self.payload["text_inputs"]
+        text_inputs = self._text_inputs()
         if data.startswith(text_inputs):
             data = data[len(text_inputs) :]
 
@@ -53,6 +53,14 @@ class PredictionResult(NamedTuple):
     def output_sequence_num_words(self):
         """The word count of the output sequence."""
         return self._num_words(self.output_sequence())
+    
+    def _text_inputs(self) -> str:
+        if "inputs" in self.payload:
+            return self.payload["inputs"]
+        elif "text_inputs" in self.payload:
+            return self.payload["text_inputs"]
+        else:
+            raise ValueError("Expected input text keys are not detected in payload.")
 
     @staticmethod
     def _num_words(text: str) -> int:
@@ -117,7 +125,6 @@ def run_load_test(
     max_workers: int,
 ) -> BatchInvocationStatistics:
     """Concurrently invoke an endpoint prediction multiple times and gather results in BatchInvocationStatistics."""
-    time.sleep(60.0)  # wait for 1 cloudwatch period to ensure no extra queries are reported
     time_utc_start = datetime.datetime.utcnow()
     with futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         predictors = repeat(predictor, num_invocations)
@@ -215,28 +222,36 @@ def run_benchmarking_load_tests(
     max_workers: int,
     retry_wait_time: float,
     max_total_retry_time: float,
+    run_latency_load_test: bool,
+    run_throughput_load_test: bool,
 ) -> Dict[str, Any]:
     """Run all benchmarks and load tests on the provided Predictor."""
-    print(f"{logging_prefix(model_id, payload_name)} Begin latency load test ...")
-    statistics_latency = run_load_test(predictor, payload, num_invocations, 1)
-    metrics = extract_cloudwatch_metrics(
-        statistics_latency,
-        model_id,
-        payload_name,
-        predictor.endpoint_name,
-        retry_wait_time,
-        max_total_retry_time,
-    )
-    metrics["Client"] = statistics_latency.get_client_statistics()
+    metrics: Dict[str, Any] = {}
 
-    print(f"{logging_prefix(model_id, payload_name)} Begin throughput load test ...")
-    statistics_throughput = run_load_test(predictor, payload, num_invocations, max_workers)
-    metrics["Throughput"] = statistics_throughput.throughput()
-    metrics["WordThroughput"] = metrics["Throughput"] * metrics["Client"]["OutputSequenceWords"]["Average"]
+    if run_latency_load_test is True:
+        print(f"{logging_prefix(model_id, payload_name)} Begin latency load test ...")
+        time.sleep(60.0)  # wait for 1 cloudwatch period to ensure no extra queries are reported
+        statistics_latency = run_load_test(predictor, payload, num_invocations, 1)
+        metrics = extract_cloudwatch_metrics(
+            statistics_latency,
+            model_id,
+            payload_name,
+            predictor.endpoint_name,
+            retry_wait_time,
+            max_total_retry_time,
+        )
+        metrics["Client"] = statistics_latency.get_client_statistics()
+
+    if run_throughput_load_test is True:
+        print(f"{logging_prefix(model_id, payload_name)} Begin throughput load test ...")
+        statistics_throughput = run_load_test(predictor, payload, num_invocations, max_workers)
+        metrics["Throughput"] = statistics_throughput.throughput()
+        metrics["OutputSequenceWords"] = statistics_throughput.get_client_statistics()["OutputSequenceWords"]
+        metrics["WordThroughput"] = metrics["Throughput"] * metrics["OutputSequenceWords"]["Average"]
+        metrics["SampleOutput"] = statistics_throughput.results[0].output_sequence()
 
     print(f"{logging_prefix(model_id, payload_name)} Finished benchmarking load tests ...")
     metrics["ModelID"] = model_id
     metrics["PayloadName"] = payload_name
-    metrics["SampleOutput"] = statistics_throughput.results[0].output_sequence()
 
     return metrics
